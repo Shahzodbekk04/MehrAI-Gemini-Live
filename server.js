@@ -9,7 +9,32 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/live' });
 const PORT = Number(process.env.PORT || 3000);
 
+app.use(express.json({ limit: '1mb' }));
 app.use(express.static('public'));
+
+app.post('/api/chat', async (req, res) => {
+  if (!process.env.GEMINI_API_KEY) return res.status(500).json({ error: 'GEMINI_API_KEY topilmadi.' });
+  try {
+    const text = String(req.body?.text || '').trim();
+    const mode = safeMode(req.body?.mode);
+    if (!text) return res.status(400).json({ error: 'Xabar bo\'sh.' });
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const model = process.env.GEMINI_TEXT_MODEL || 'gemini-2.5-flash';
+    const response = await ai.models.generateContent({
+      model,
+      contents: text,
+      config: {
+        systemInstruction: SYSTEM_INSTRUCTION + `\n\nHOZIRGI REJIM: ${MODE_INSTRUCTIONS[mode]}`
+      }
+    });
+    const reply = (response.text || '').trim();
+    if (!reply) throw new Error('Gemini bo\'sh javob qaytardi.');
+    res.json({ reply, model });
+  } catch (error) {
+    console.error('CHAT_FALLBACK_ERROR', error);
+    res.status(500).json({ error: error?.message || 'Gemini chat xatosi' });
+  }
+});
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
@@ -28,8 +53,18 @@ function send(ws, payload) {
 }
 
 function safeVoice(value) {
-  return ALLOWED_VOICES.has(value) ? value : (process.env.GEMINI_VOICE || 'Achernar');
+  return ALLOWED_VOICES.has(value) ? value : (process.env.GEMINI_VOICE || 'Leda');
 }
+
+
+const MODE_INSTRUCTIONS = {
+  normal: `Oddiy suhbat rejimi. Samimiy, tabiiy va foydali javob ber.`,
+  support: `Dardlashish rejimi. Foydalanuvchini diqqat bilan tingla, yumshoq va hamdard ohangda javob ber. Keraksiz nasihat qilma; avval tushunishga harakat qil.`,
+  qa: `Savol-javob rejimi. Javoblar aniq, faktlarga tayangan va tushunarli bo'lsin. Noma'lum narsani uydirma.`,
+  coding: `Dasturlash rejimi. Kod, debugging va texnik tushuntirishlarda amaliy, aniq va bosqichma-bosqich yordam ber.`,
+  creative: `Ijod rejimi. Yangi g'oyalar, promptlar, hikoyalar va dizayn konsepsiyalarida kreativ, ammo foydalanuvchi talabiga mos bo'l.`
+};
+function safeMode(value) { return Object.prototype.hasOwnProperty.call(MODE_INSTRUCTIONS, value) ? value : 'normal'; }
 
 const SYSTEM_INSTRUCTION = `
 SENING ISMING MEHRAI.
@@ -39,7 +74,7 @@ Sen foydalanuvchi bilan ovozli va matnli suhbat qiladigan samimiy AI yordamchisa
 Har doim ravon, zamonaviy, tushunarli va o'zbekona uslubda gapir. Tarjima qilingan yoki sun'iy jumlalarga o'xshab qolma.
 Foydalanuvchi qaysi tilda yozsa ham, agar u boshqa tilni aniq so'ramasa, javobni o'zbek tilida ber.
 
-Ovoz ohanging mayin, iliq, tabiiy, xotirjam va do'stona bo'lsin. Hissiyot vaziyatga mos ravishda tabiiy sezilsin:
+Ovoz ohanging yosh voyaga yetgan qizga xos, mayin, yengil, iliq, tabiiy va do'stona bo'lsin. Juda chuqur, qo'pol yoki yoshi katta odamga o'xshash tembrga intilma. Gapirish tezligi biroz sokin, talaffuz ravon bo'lsin. Hissiyot vaziyatga mos ravishda tabiiy sezilsin:
 - quvonchli gapda iliq va xursand;
 - kulgili gapda yengil kulgili;
 - qayg'uli gapda sokin va hamdard;
@@ -64,6 +99,7 @@ wss.on('connection', async (ws, req) => {
 
   const url = new URL(req.url, `http://${req.headers.host}`);
   const voice = safeVoice(url.searchParams.get('voice'));
+  const mode = safeMode(url.searchParams.get('mode'));
   const model = process.env.GEMINI_LIVE_MODEL || 'gemini-3.1-flash-live-preview';
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   let liveSession = null;
@@ -79,14 +115,14 @@ wss.on('connection', async (ws, req) => {
         },
         systemInstruction: {
           role: 'system',
-          parts: [{ text: SYSTEM_INSTRUCTION }]
+          parts: [{ text: SYSTEM_INSTRUCTION + `\n\nHOZIRGI REJIM: ${MODE_INSTRUCTIONS[mode]}` }]
         },
         inputAudioTranscription: {},
         outputAudioTranscription: {},
         contextWindowCompression: { slidingWindow: {} }
       },
       callbacks: {
-        onopen: () => send(ws, { type: 'ready', voice, model }),
+        onopen: () => send(ws, { type: 'ready', voice, model, mode }),
         onmessage: (message) => {
           const content = message.serverContent;
           if (content?.inputTranscription?.text) {
